@@ -4,6 +4,7 @@ import { FALLBACK_MOVIES } from '../data/fallbackMovies'
 import { drawPair, filterMoviesByCategory, shuffleItems } from '../lib/movies'
 import { fetchBestScore, fetchTopScores, submitScore } from '../services/leaderboard'
 import { isSupabaseConfigured } from '../services/supabase'
+import { useAuth } from './useAuth'
 import {
   fetchDiscoverPage,
   fetchMovieDetails,
@@ -16,7 +17,6 @@ import {
 import type { GamePhase, GameScreen, LeaderboardEntry, Movie, PickSide, SubmittedScore } from '../types/movie'
 
 const BEST_SCORE_KEY = 'box-office-duel-best-score'
-const PLAYER_PSEUDO_KEY = 'box-office-duel-pseudo'
 const LEADERBOARD_LIMIT = 20
 const REVEAL_DELAY_MS = 900
 const ROUND_DURATION_SECONDS = 60
@@ -33,6 +33,15 @@ const DISCOVER_SORT_OPTIONS = [
 ]
 
 export function useBoxOfficeGame() {
+  const {
+    user,
+    pseudo,
+    hasProfile,
+    isAuthLoading,
+    signInWithMagicLink: requestMagicLink,
+    createProfile: createAuthProfile,
+    signOut,
+  } = useAuth()
   const [champion, setChampion] = useState<Movie | null>(null)
   const [challenger, setChallenger] = useState<Movie | null>(null)
   const [phase, setPhase] = useState<GamePhase>('guessing')
@@ -45,9 +54,8 @@ export function useBoxOfficeGame() {
   const [isGameOverModalOpen, setIsGameOverModalOpen] = useState(false)
   const [screen, setScreen] = useState<GameScreen>('category-select')
   const [selectedCategoryId, setSelectedCategoryId] = useState<CategoryId>('top-100')
-  const [pseudo, setPseudo] = useState('')
-  const [draftPseudo, setDraftPseudo] = useState('')
-  const [pseudoError, setPseudoError] = useState<string | null>(null)
+  const [magicLinkSent, setMagicLinkSent] = useState(false)
+  const [profileError, setProfileError] = useState<string | null>(null)
   const [tmdbKey] = useState(INITIAL_TMDB_KEY)
   const [pool, setPool] = useState<Movie[]>([])
   const [isBuildingPool, setIsBuildingPool] = useState(false)
@@ -101,6 +109,8 @@ export function useBoxOfficeGame() {
     setLeaderboardStatus('idle')
     setLeaderboardMessage(null)
     setSubmittedScore(null)
+    setMagicLinkSent(false)
+    setProfileError(null)
     lastPairRef.current = []
     seenMovieIdsRef.current = new Set()
     hasStartedFirstPairRef.current = false
@@ -108,12 +118,6 @@ export function useBoxOfficeGame() {
   }
 
   useEffect(() => {
-    const savedPseudo = sessionStorage.getItem(PLAYER_PSEUDO_KEY)?.trim() ?? ''
-    if (isValidPseudo(savedPseudo)) {
-      setPseudo(savedPseudo)
-      setDraftPseudo(savedPseudo)
-    }
-
     const savedBestScore = Number(localStorage.getItem(BEST_SCORE_KEY))
     if (Number.isFinite(savedBestScore)) {
       setBestScore(savedBestScore)
@@ -139,12 +143,11 @@ export function useBoxOfficeGame() {
 
   useEffect(() => {
     if (isGameOver) {
-      const savedPseudo = sessionStorage.getItem(PLAYER_PSEUDO_KEY)?.trim() ?? pseudo
-      setDraftPseudo(savedPseudo)
-      setPseudoError(null)
+      setMagicLinkSent(false)
+      setProfileError(null)
       setIsGameOverModalOpen(true)
     }
-  }, [isGameOver, pseudo])
+  }, [isGameOver])
 
   useEffect(() => {
     isGameOverRef.current = isGameOver
@@ -323,64 +326,99 @@ export function useBoxOfficeGame() {
     [tmdbKey],
   )
 
-  const submitPseudo = useCallback(() => {
-    const nextPseudo = draftPseudo.trim()
+  const syncLeaderboard = useCallback(async () => {
+    if (hasSubmittedScoreRef.current) return
 
-    if (!isValidPseudo(nextPseudo)) {
-      setPseudoError('Entre 3 et 20 caractères.')
+    if (!isSupabaseConfigured) {
+      setLeaderboardStatus('unavailable')
+      setLeaderboardMessage('Classement en ligne non configuré.')
       return
     }
 
-    sessionStorage.setItem(PLAYER_PSEUDO_KEY, nextPseudo)
-    setPseudo(nextPseudo)
-    setDraftPseudo(nextPseudo)
-    setPseudoError(null)
-
-    if (hasSubmittedScoreRef.current) return
-
     hasSubmittedScoreRef.current = true
+    setLeaderboardStatus('loading')
+    setLeaderboardMessage(null)
 
-    async function syncLeaderboard() {
-      if (!isSupabaseConfigured) {
-        setLeaderboardStatus('unavailable')
-        setLeaderboardMessage("Classement en ligne non configuré.")
-        return
-      }
+    const category = getCategory(selectedCategoryId)
+    const submitted = await submitScore({
+      categoryId: category.id,
+      categoryLabel: category.label,
+      score,
+    })
 
-      setLeaderboardStatus('loading')
-      setLeaderboardMessage(null)
+    if (submitted.data) {
+      setSubmittedScore(submitted.data)
+    }
 
-      const category = getCategory(selectedCategoryId)
-      const submitted = await submitScore({
-        pseudo: nextPseudo,
-        categoryId: category.id,
-        categoryLabel: category.label,
-        score,
-      })
+    const topScores = await fetchTopScores(LEADERBOARD_LIMIT)
+    setLeaderboard(topScores.data)
 
-      if (submitted.data) {
-        setSubmittedScore(submitted.data)
-      }
+    const globalBestScore = topScores.data[0]?.score ?? submitted.data?.score
+    if (typeof globalBestScore === 'number') {
+      setBestScore(globalBestScore)
+    }
 
-      const topScores = await fetchTopScores(LEADERBOARD_LIMIT)
-      setLeaderboard(topScores.data)
+    if (submitted.error || topScores.error) {
+      setLeaderboardStatus(topScores.data.length ? 'ready' : 'unavailable')
+      setLeaderboardMessage(submitted.error ?? topScores.error)
+      return
+    }
 
-      const globalBestScore = topScores.data[0]?.score ?? submitted.data?.score
-      if (typeof globalBestScore === 'number') {
-        setBestScore(globalBestScore)
-      }
+    setLeaderboardStatus('ready')
+  }, [score, selectedCategoryId])
 
-      if (submitted.error || topScores.error) {
-        setLeaderboardStatus(topScores.data.length ? 'ready' : 'unavailable')
-        setLeaderboardMessage(submitted.error ?? topScores.error)
-        return
-      }
+  useEffect(() => {
+    if (!isGameOver) return
 
-      setLeaderboardStatus('ready')
+    if (!isSupabaseConfigured) {
+      setLeaderboardStatus('unavailable')
+      setLeaderboardMessage('Classement en ligne non configuré.')
+      return
+    }
+
+    if (!user || !hasProfile || isAuthLoading) {
+      setLeaderboardStatus('idle')
+      return
     }
 
     void syncLeaderboard()
-  }, [draftPseudo, score, selectedCategoryId])
+  }, [hasProfile, isAuthLoading, isGameOver, syncLeaderboard, user])
+
+  const signInWithMagicLink = useCallback(
+    async (email: string) => {
+      setMagicLinkSent(false)
+      setProfileError(null)
+
+      const result = await requestMagicLink(email)
+      if (result.error) {
+        setProfileError(result.error)
+        return result
+      }
+
+      setMagicLinkSent(true)
+      return result
+    },
+    [requestMagicLink],
+  )
+
+  const createProfile = useCallback(
+    async (nextPseudo: string) => {
+      setProfileError(null)
+
+      const result = await createAuthProfile(nextPseudo)
+      if (result.error) {
+        setProfileError(result.error)
+        return result
+      }
+
+      if (isGameOver && !hasSubmittedScoreRef.current) {
+        void syncLeaderboard()
+      }
+
+      return result
+    },
+    [createAuthProfile, isGameOver, syncLeaderboard],
+  )
 
   const closeGameOverModal = useCallback(() => {
     setIsGameOverModalOpen(false)
@@ -401,9 +439,17 @@ export function useBoxOfficeGame() {
     setScore(0)
     setTimeLeft(ROUND_DURATION_SECONDS)
     setIsGameOver(false)
+    setIsGameOverModalOpen(false)
     setPhase('guessing')
     setPickSide(null)
     setWasCorrect(null)
+    setLeaderboard([])
+    setLeaderboardStatus('idle')
+    setLeaderboardMessage(null)
+    setSubmittedScore(null)
+    setMagicLinkSent(false)
+    setProfileError(null)
+    hasSubmittedScoreRef.current = false
     setNextPair(source)
   }, [pool])
 
@@ -465,26 +511,25 @@ export function useBoxOfficeGame() {
     phase,
     pickSide,
     pool,
+    profileError,
     pseudo,
-    pseudoError,
     restartGame,
     score,
     screen,
     selectedCategory: getCategory(selectedCategoryId),
     closeGameOverModal,
     showCategorySelect,
+    signInWithMagicLink,
+    signOut,
     startCategory,
     submittedScore,
-    submitPseudo,
-    draftPseudo,
-    setDraftPseudo,
+    createProfile,
+    hasProfile,
+    isSupabaseConfigured,
+    magicLinkSent,
     timeLeft,
     tmdbKey,
+    user,
     wasCorrect,
   }
-}
-
-function isValidPseudo(value: string) {
-  const trimmedValue = value.trim()
-  return trimmedValue.length >= 3 && trimmedValue.length <= 20
 }

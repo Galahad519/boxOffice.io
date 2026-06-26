@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+import type { User } from '@supabase/supabase-js'
 import { Film, Ticket, Trophy, X } from 'lucide-react'
 import { CategorySelectScreen } from '../../components/CategorySelectScreen'
 import { PosterCard } from '../../components/PosterCard'
@@ -25,22 +27,26 @@ export function BoxOfficeDuel() {
     leaderboard,
     leaderboardMessage,
     leaderboardStatus,
+    profileError,
     phase,
     pickSide,
     pool,
     pseudo,
-    pseudoError,
     restartGame,
     score,
     screen,
     selectedCategory,
     showCategorySelect,
+    signInWithMagicLink,
+    signOut,
     startCategory,
     submittedScore,
-    submitPseudo,
-    draftPseudo,
-    setDraftPseudo,
+    createProfile,
+    hasProfile,
+    isSupabaseConfigured,
+    magicLinkSent,
     timeLeft,
+    user,
     wasCorrect,
   } = useBoxOfficeGame()
 
@@ -170,15 +176,19 @@ export function BoxOfficeDuel() {
           leaderboard={leaderboard}
           leaderboardMessage={leaderboardMessage}
           leaderboardStatus={leaderboardStatus}
-          draftPseudo={draftPseudo}
           onClose={closeGameOverModal}
-          onDraftPseudoChange={setDraftPseudo}
           onRestart={restartGame}
           onChangeCategory={showCategorySelect}
           pseudo={pseudo}
-          pseudoError={pseudoError}
+          profileError={profileError}
           submittedScore={submittedScore}
-          onSubmitPseudo={submitPseudo}
+          user={user}
+          hasProfile={hasProfile}
+          isSupabaseConfigured={isSupabaseConfigured}
+          magicLinkSent={magicLinkSent}
+          onCreateProfile={createProfile}
+          onSignInWithMagicLink={signInWithMagicLink}
+          onSignOut={signOut}
         />
       )}
       <Toaster />
@@ -192,31 +202,47 @@ function GameOverModal({
   leaderboard,
   leaderboardMessage,
   leaderboardStatus,
-  draftPseudo,
   onClose,
-  onDraftPseudoChange,
   onRestart,
   onChangeCategory,
-  onSubmitPseudo,
   pseudo,
-  pseudoError,
+  profileError,
   submittedScore,
+  user,
+  hasProfile,
+  isSupabaseConfigured,
+  magicLinkSent,
+  onCreateProfile,
+  onSignInWithMagicLink,
+  onSignOut,
 }: {
   score: number
   bestScore: number
   leaderboard: LeaderboardEntry[]
   leaderboardMessage: string | null
   leaderboardStatus: 'idle' | 'loading' | 'ready' | 'unavailable'
-  draftPseudo: string
   onClose: () => void
-  onDraftPseudoChange: (value: string) => void
   onRestart: () => void
   onChangeCategory: () => void
-  onSubmitPseudo: () => void
-  pseudo: string
-  pseudoError: string | null
+  pseudo: string | null
+  profileError: string | null
   submittedScore: SubmittedScore | null
+  user: User | null
+  hasProfile: boolean
+  isSupabaseConfigured: boolean
+  magicLinkSent: boolean
+  onCreateProfile: (pseudo: string) => Promise<{ error: string | null }>
+  onSignInWithMagicLink: (email: string) => Promise<{ error: string | null }>
+  onSignOut: () => void
 }) {
+  const [email, setEmail] = useState('')
+  const [profilePseudo, setProfilePseudo] = useState(pseudo ?? '')
+  const [formError, setFormError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setProfilePseudo(pseudo ?? '')
+  }, [pseudo])
+
   const playerIsInTop = leaderboard.some((entry) => {
     return (
       entry.pseudo === (submittedScore?.pseudo ?? pseudo) &&
@@ -265,43 +291,48 @@ function GameOverModal({
               <ScorePanel icon={<Trophy size={16} />} label="Record" value={bestScore} />
             </div>
 
-            {!submittedScore && (
+            {isSupabaseConfigured && (
               <form
                 className="mt-5 rounded-lg border border-dashed border-[#e8b339]/35 bg-[#15131a] p-3 text-left"
-                onSubmit={(event) => {
+                onSubmit={async (event) => {
                   event.preventDefault()
-                  onSubmitPseudo()
+                  setFormError(null)
+
+                  if (!user) {
+                    const result = await onSignInWithMagicLink(email)
+                    if (result.error) {
+                      setFormError(result.error)
+                    }
+                    return
+                  }
+
+                  if (!hasProfile) {
+                    const nextPseudo = profilePseudo.trim()
+                    if (nextPseudo.length < 3 || nextPseudo.length > 20) {
+                      setFormError('Entre 3 à 20 caractères.')
+                      return
+                    }
+
+                    const result = await onCreateProfile(nextPseudo)
+                    if (result.error) {
+                      setFormError(result.error)
+                    }
+                  }
                 }}
               >
-                <label
-                  htmlFor="score-pseudo"
-                  className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#9a93a6]"
-                >
-                  Publier ton score
-                </label>
-                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                  <Input
-                    id="score-pseudo"
-                    value={draftPseudo}
-                    minLength={3}
-                    maxLength={20}
-                    onChange={(event) => onDraftPseudoChange(event.target.value)}
-                    placeholder="Ton pseudo"
-                    className="h-10 border-white/10 bg-[#241f2c] font-mono text-[#f3eee3] placeholder:text-[#9a93a6]/60 focus-visible:ring-[#e8b339]/45"
-                  />
-                  <Button
-                    type="submit"
-                    className="h-10 bg-[#e8b339] text-sm font-bold text-[#15131a] hover:bg-[#f1c85b]"
-                    disabled={leaderboardStatus === 'loading'}
-                  >
-                    Valider
-                  </Button>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-3">
-                  <p className="m-0 text-xs text-[#9a93a6]">Optionnel, 3 à 20 caractères.</p>
-                  <p className="m-0 font-mono text-xs text-[#9a93a6]">{draftPseudo.trim().length}/20</p>
-                </div>
-                {pseudoError && <p className="mt-2 text-xs font-semibold text-[#c8253d]">{pseudoError}</p>}
+                <AuthScoreForm
+                  email={email}
+                  formError={formError ?? profileError}
+                  hasProfile={hasProfile}
+                  isLoading={leaderboardStatus === 'loading'}
+                  magicLinkSent={magicLinkSent}
+                  onEmailChange={setEmail}
+                  onProfilePseudoChange={setProfilePseudo}
+                  onSignOut={onSignOut}
+                  profilePseudo={profilePseudo}
+                  pseudo={pseudo}
+                  user={user}
+                />
               </form>
             )}
 
@@ -339,6 +370,128 @@ function GameOverModal({
   )
 }
 
+function AuthScoreForm({
+  email,
+  formError,
+  hasProfile,
+  isLoading,
+  magicLinkSent,
+  onEmailChange,
+  onProfilePseudoChange,
+  onSignOut,
+  profilePseudo,
+  pseudo,
+  user,
+}: {
+  email: string
+  formError: string | null
+  hasProfile: boolean
+  isLoading: boolean
+  magicLinkSent: boolean
+  onEmailChange: (value: string) => void
+  onProfilePseudoChange: (value: string) => void
+  onSignOut: () => void
+  profilePseudo: string
+  pseudo: string | null
+  user: User | null
+}) {
+  if (!user) {
+    return (
+      <>
+        <label
+          htmlFor="score-email"
+          className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#9a93a6]"
+        >
+          Publier ton score
+        </label>
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+          <Input
+            id="score-email"
+            value={email}
+            type="email"
+            onChange={(event) => onEmailChange(event.target.value)}
+            placeholder="ton@email.com"
+            className="h-10 border-white/10 bg-[#241f2c] font-mono text-[#f3eee3] placeholder:text-[#9a93a6]/60 focus-visible:ring-[#e8b339]/45"
+          />
+          <Button
+            type="submit"
+            className="min-h-10 bg-[#e8b339] text-sm font-bold whitespace-normal text-[#15131a] hover:bg-[#f1c85b]"
+            disabled={isLoading}
+          >
+            Recevoir un lien de connexion
+          </Button>
+        </div>
+        <p className="mt-2 text-xs text-[#9a93a6]">
+          Reçois un lien de connexion pour publier ton score dans le classement.
+        </p>
+        {magicLinkSent && (
+          <p className="mt-2 text-xs font-semibold text-[#e8b339]">
+            Vérifie tes emails sur cet appareil et clique sur le lien pour continuer.
+          </p>
+        )}
+        {formError && <p className="mt-2 text-xs font-semibold text-[#c8253d]">{formError}</p>}
+      </>
+    )
+  }
+
+  if (!hasProfile) {
+    return (
+      <>
+        <label
+          htmlFor="score-profile-pseudo"
+          className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#9a93a6]"
+        >
+          Choisir ton pseudo
+        </label>
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+          <Input
+            id="score-profile-pseudo"
+            value={profilePseudo}
+            minLength={3}
+            maxLength={20}
+            onChange={(event) => onProfilePseudoChange(event.target.value)}
+            placeholder="Ton pseudo"
+            className="h-10 border-white/10 bg-[#241f2c] font-mono text-[#f3eee3] placeholder:text-[#9a93a6]/60 focus-visible:ring-[#e8b339]/45"
+          />
+          <Button
+            type="submit"
+            className="h-10 bg-[#e8b339] text-sm font-bold text-[#15131a] hover:bg-[#f1c85b]"
+            disabled={isLoading}
+          >
+            Valider
+          </Button>
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <p className="m-0 text-xs text-[#9a93a6]">3 à 20 caractères.</p>
+          <p className="m-0 font-mono text-xs text-[#9a93a6]">{profilePseudo.trim().length}/20</p>
+        </div>
+        {formError && <p className="mt-2 text-xs font-semibold text-[#c8253d]">{formError}</p>}
+      </>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <p className="m-0 text-[11px] font-bold uppercase tracking-[0.18em] text-[#9a93a6]">
+          Score en ligne
+        </p>
+        <p className="mt-1 text-sm font-semibold text-[#f3eee3]">
+          Connecté comme <span className="font-mono text-[#e8b339]">{pseudo ?? 'Joueur'}</span>
+        </p>
+      </div>
+      <Button
+        type="button"
+        variant="ghost"
+        onClick={onSignOut}
+        className="h-9 justify-start text-xs font-bold text-[#9a93a6] hover:bg-[#2c2733] hover:text-[#f3eee3] sm:justify-center"
+      >
+        Se déconnecter
+      </Button>
+    </div>
+  )
+}
+
 function LeaderboardPanel({
   entries,
   isPlayerInTop,
@@ -351,7 +504,7 @@ function LeaderboardPanel({
   entries: LeaderboardEntry[]
   isPlayerInTop: boolean
   message: string | null
-  pseudo: string
+  pseudo: string | null
   score: number
   status: 'idle' | 'loading' | 'ready' | 'unavailable'
   submittedScore: SubmittedScore | null
@@ -375,7 +528,7 @@ function LeaderboardPanel({
 
       {status === 'idle' && (
         <p className="mt-4 rounded-md border border-white/10 bg-[#241f2c] px-3 py-3 text-sm text-[#9a93a6]">
-          Entre ton pseudo pour publier ton score et afficher le classement.
+          Connecte-toi pour publier ton score et afficher le classement global.
         </p>
       )}
 
