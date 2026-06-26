@@ -39,6 +39,19 @@ export function drawPair(source: Movie[], excludeIds: string[] = []): [Movie, Mo
   return [first, second]
 }
 
+export function shuffleItems<T>(items: T[]) {
+  const shuffled = [...items]
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1))
+    const current = shuffled[index]
+    shuffled[index] = shuffled[swapIndex]
+    shuffled[swapIndex] = current
+  }
+
+  return shuffled
+}
+
 export function filterMoviesByCategory(source: Movie[], category: Category) {
   if (category.id === 'random') return source
 

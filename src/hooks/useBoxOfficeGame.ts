@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CATEGORIES, getCategory, type CategoryId } from '../data/categories'
 import { FALLBACK_MOVIES } from '../data/fallbackMovies'
-import { drawPair, filterMoviesByCategory } from '../lib/movies'
+import { drawPair, filterMoviesByCategory, shuffleItems } from '../lib/movies'
 import {
   fetchDiscoverPage,
   fetchMovieDetails,
@@ -17,6 +17,7 @@ type GameScreen = 'category-select' | 'loading' | 'playing'
 const BEST_SCORE_KEY = 'box-office-duel-best-score'
 const REVEAL_DELAY_MS = 900
 const ROUND_DURATION_SECONDS = 60
+const MIN_POOL_BEFORE_FIRST_TURN = 20
 const INITIAL_TMDB_KEY = import.meta.env.VITE_TMDB_API_KEY?.trim() ?? ''
 
 export function useBoxOfficeGame() {
@@ -37,12 +38,20 @@ export function useBoxOfficeGame() {
   const timeoutRef = useRef<number | null>(null)
   const isGameOverRef = useRef(false)
   const lastPairRef = useRef<string[]>([])
+  const seenMovieIdsRef = useRef<Set<string>>(new Set())
+  const hasStartedFirstPairRef = useRef(false)
 
   function setNextPair(source: Movie[]) {
-    const [first, second] = drawPair(source, lastPairRef.current)
+    const recentAndSeenIds = [...lastPairRef.current, ...seenMovieIdsRef.current]
+    const enoughUnseenMovies = source.filter((movie) => !recentAndSeenIds.includes(movie.id)).length >= 2
+    const excludeIds = enoughUnseenMovies ? recentAndSeenIds : lastPairRef.current
+    const [first, second] = drawPair(source, excludeIds)
+
     setChampion(first)
     setChallenger(second)
     lastPairRef.current = [first.id, second.id]
+    seenMovieIdsRef.current.add(first.id)
+    seenMovieIdsRef.current.add(second.id)
   }
 
   function getFallbackSource(categoryId = selectedCategoryId) {
@@ -65,6 +74,8 @@ export function useBoxOfficeGame() {
     setIsGameOver(false)
     setPool([])
     lastPairRef.current = []
+    seenMovieIdsRef.current = new Set()
+    hasStartedFirstPairRef.current = false
   }
 
   useEffect(() => {
@@ -110,27 +121,33 @@ export function useBoxOfficeGame() {
   }, [champion, challenger, isGameOver, screen])
 
   useEffect(() => {
-    if (screen === 'loading' && !champion && !challenger && pool.length >= 2) {
+    if (screen === 'loading' && !hasStartedFirstPairRef.current && pool.length >= MIN_POOL_BEFORE_FIRST_TURN) {
+      hasStartedFirstPairRef.current = true
       setNextPair(pool)
       setScreen('playing')
     }
-  }, [champion, challenger, pool, screen])
+  }, [pool, screen])
 
   useEffect(() => {
     if (!tmdbKey || screen !== 'loading') return
 
     let cancelled = false
     let currentSize = 0
+    let accumulatedPool: Movie[] = []
     setPool([])
     setIsBuildingPool(true)
 
     async function buildPool() {
       const category = getCategory(selectedCategoryId)
       const seenIds = new Set<number>()
-      let page = 1
+      const queuedPages = [1]
+      let hasQueuedCatalogPages = false
 
-      while (!cancelled && page <= MAX_PAGES && currentSize < POOL_CAP) {
+      while (!cancelled && queuedPages.length > 0 && currentSize < POOL_CAP) {
+        const page = queuedPages.shift()
         let discoverData
+
+        if (!page) break
 
         try {
           discoverData = await fetchDiscoverPage(tmdbKey, page, category.tmdbGenreId)
@@ -139,6 +156,12 @@ export function useBoxOfficeGame() {
         }
 
         if (cancelled) return
+
+        if (!hasQueuedCatalogPages) {
+          const maxPage = Math.min(discoverData.total_pages ?? MAX_PAGES, MAX_PAGES)
+          queuedPages.push(...shuffleItems(Array.from({ length: Math.max(maxPage - 1, 0) }, (_, index) => index + 2)))
+          hasQueuedCatalogPages = true
+        }
 
         const candidates = (discoverData.results ?? []).filter((movie) => !seenIds.has(movie.id))
         candidates.forEach((movie) => seenIds.add(movie.id))
@@ -158,11 +181,13 @@ export function useBoxOfficeGame() {
         if (mapped.length) {
           setPool((previousPool) => {
             const existingIds = new Set(previousPool.map((movie) => movie.id))
-            const freshMovies = mapped.filter((movie) => !existingIds.has(movie.id))
+            const freshMovies = shuffleItems(mapped.filter((movie) => !existingIds.has(movie.id)))
             const nextPool = [...previousPool, ...freshMovies].slice(0, POOL_CAP)
             currentSize = nextPool.length
+            accumulatedPool = nextPool
 
-            if (!cancelled && !champion && !challenger && nextPool.length >= 2) {
+            if (!cancelled && !hasStartedFirstPairRef.current && nextPool.length >= MIN_POOL_BEFORE_FIRST_TURN) {
+              hasStartedFirstPairRef.current = true
               window.setTimeout(() => {
                 if (!cancelled) {
                   setNextPair(nextPool)
@@ -175,16 +200,18 @@ export function useBoxOfficeGame() {
           })
         }
 
-        page += 1
-        if (!discoverData.total_pages || page > discoverData.total_pages) break
-
         await new Promise((resolve) => {
           window.setTimeout(resolve, PAGE_DELAY_MS)
         })
       }
 
       if (!cancelled) {
-        if (currentSize < 2) {
+        if (!hasStartedFirstPairRef.current && accumulatedPool.length >= 2) {
+          hasStartedFirstPairRef.current = true
+          setNextPair(accumulatedPool)
+          setScreen('playing')
+        } else if (!hasStartedFirstPairRef.current) {
+          hasStartedFirstPairRef.current = true
           setNextPair(getFallbackSource(selectedCategoryId))
           setScreen('playing')
         }
@@ -202,7 +229,7 @@ export function useBoxOfficeGame() {
       cancelled = true
       setIsBuildingPool(false)
     }
-  }, [champion, challenger, screen, selectedCategoryId, tmdbKey])
+  }, [screen, selectedCategoryId, tmdbKey])
 
   const persistBestScore = useCallback((value: number) => {
     localStorage.setItem(BEST_SCORE_KEY, String(value))
